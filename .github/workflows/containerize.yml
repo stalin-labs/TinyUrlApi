@@ -258,25 +258,25 @@ jobs:
       - name: Verify build
         run: |
           AI_OUTPUT=$(cat /tmp/ai_output.json)
+          SLN_NAME=$(echo "$AI_OUTPUT" | jq -r '.analysis.sln_name // empty')
 
-          SLN=$(echo "$AI_OUTPUT" | jq -r '.analysis.sln_name // empty')
-
-          if [ -n "$SLN" ] && [ -f "${SLN}.sln" ]; then
-            SLN_FILE="${SLN}.sln"
+          # Fallback — find the .sln file directly if AI output is empty
+          if [ -z "$SLN_NAME" ]; then
+            SLN_FILE=$(find . -maxdepth 2 -not -path './.git/*' -not -path './.reference/*' -name "*.sln" | head -1)
+            if [ -z "$SLN_FILE" ]; then
+              echo "ERROR: No .sln file found"
+              exit 1
+            fi
+            SLN_NAME=$(basename "$SLN_FILE" .sln)
+            echo "SLN not in AI output, detected from filesystem: $SLN_NAME"
           else
-            SLN_FILE=$(find . -name "*.sln" | head -n 1)
+            SLN_FILE=$(find . -maxdepth 2 -not -path './.git/*' -not -path './.reference/*' -name "${SLN_NAME}.sln" | head -1)
+            echo "SLN from AI output: $SLN_NAME"
           fi
 
-          if [ -z "$SLN_FILE" ]; then
-            echo "No solution file found"
-            exit 1
-          fi
-
-          echo "Using solution: $SLN_FILE"
-
+          echo "Building: $SLN_FILE"
           dotnet restore "$SLN_FILE"
           dotnet build "$SLN_FILE" --configuration Release --no-restore
-
           echo "Build verification passed"
 
       # -----------------------------------------------------------------------
