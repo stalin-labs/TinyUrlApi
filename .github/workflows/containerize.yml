@@ -188,8 +188,8 @@ jobs:
           cat /tmp/ai_output.json | jq '.analysis'
           echo "=== program_cs field ==="
           cat /tmp/ai_output.json | jq '.program_cs' | head -20
-          echo "=== Keys in AI output ==="
-          cat /tmp/ai_output.json | jq 'keys'
+          # echo "=== Keys in AI output ==="
+          # cat /tmp/ai_output.json | jq 'keys'
 
       - name: Write updated Program.cs
         run: |
