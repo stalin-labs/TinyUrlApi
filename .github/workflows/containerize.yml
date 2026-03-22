@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ vars.CONTAINERIZE_REFERENCE_REPO }}
-          token: ${{ secrets.CONTAINERIZE_PAT }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           path: .reference
 
       # -----------------------------------------------------------------------
@@ -259,7 +259,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Create branch and raise PR
         env:
-          GH_TOKEN: ${{ secrets.CONTAINERIZE_PAT }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           AI_OUTPUT=$(cat /tmp/ai_output.json)
           PR_BODY=$(echo "$AI_OUTPUT" | jq -r '.pr_description')
