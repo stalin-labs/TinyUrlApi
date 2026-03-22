@@ -118,68 +118,255 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
 
       # -----------------------------------------------------------------------
-      # 6. AI analysis — generate all adapted files
+      # 6. AI analysis and file generation — split into focused calls
       # -----------------------------------------------------------------------
-      - name: AI analysis and file generation
-        id: ai
+      - name: AI call 1 — analyse repo structure
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          cat > /tmp/ai_payload.json << 'PAYLOAD_EOF'
+          CONFIG='${{ steps.config.outputs.config }}'
+          FILE_TREE='${{ steps.context.outputs.file_tree }}'
+          CSPROJ='${{ steps.context.outputs.csproj_contents }}'
+          STARTUP='${{ steps.context.outputs.startup_contents }}'
+          APPSETTINGS='${{ steps.context.outputs.appsettings_contents }}'
+
+          PROMPT="You are an expert .NET DevOps engineer. Analyse this .NET 8 Web API repository and return ONLY a valid JSON object — no markdown, no explanation, no preamble, no code fences.
+
+          RESPONSE SCHEMA:
           {
-            "model": "claude-sonnet-4-20250514",
-            "max_tokens": 8000,
-            "messages": [
-              {
-                "role": "user",
-                "content": "SYSTEM INSTRUCTIONS:\nYou are an expert .NET DevOps engineer. Analyse the provided repository context and generate containerisation artefacts. You MUST respond with ONLY a valid JSON object — no markdown, no explanation, no preamble.\n\nRESPONSE SCHEMA:\n{\n  \"analysis\": {\n    \"api_project_path\": \"relative path to the API .csproj\",\n    \"api_project_dir\": \"directory containing the API .csproj\",\n    \"assembly_name\": \"output assembly name without .dll\",\n    \"sln_name\": \"solution filename without extension\",\n    \"src_root\": \"src or Src or empty string if projects are at root\",\n    \"has_startup_cs\": true or false,\n    \"startup_pattern\": \"minimal_api or classic\",\n    \"db_dependencies\": [\"list of detected DB packages e.g. Npgsql, SqlClient, Dapper\"],\n    \"db_provider\": \"npgsql or sqlserver or none\",\n    \"connection_string_name\": \"name of connection string key in appsettings or DefaultConnection\",\n    \"health_check_nuget\": \"exact NuGet package name for health check e.g. AspNetCore.HealthChecks.Npgsql or AspNetCore.HealthChecks.SqlServer or empty if no DB\",\n    \"nuget_packages_to_add\": [\"list of all health check NuGet packages to add\"]\n  },\n  \"program_cs\": \"FULL updated Program.cs content with health checks added. If classic pattern, this is the fully merged Program.cs combining Startup.cs ConfigureServices and Configure. Preserve all existing code exactly.\",\n  \"startup_cs_can_be_deleted\": true or false,\n  \"startup_migration_notes\": \"empty string if clean migration, otherwise describe what needs manual review\",\n  \"dockerfile\": \"FULL Dockerfile content adapted from the reference template for this specific repo\",\n  \"workflow\": \"FULL GitHub Actions workflow YAML adapted from the reference template for this specific repo\",\n  \"pr_description\": \"Markdown PR description summarising all changes made\"\n}\n\nRULES FOR Dockerfile generation:\n1. Keep the exact same structure as the reference Dockerfile\n2. Replace all hardcoded project-specific COPY lines with the correct paths for THIS repo\n3. Use per-.csproj COPY lines (one per .csproj found, excluding test projects) — NOT a single COPY src/\n4. Set the correct ENTRYPOINT using the detected assembly_name\n5. Keep Artifactory NuGet source setup exactly as in the reference\n6. Keep EXPOSE 8080 and EXPOSE 8081\n7. The COPY src/ . line should use the correct src_root\n8. dotnet restore and dotnet publish should target the API .csproj path relative to WORKDIR /src\n\nRULES FOR workflow generation:\n1. Keep the exact same structure as the reference workflow\n2. Set NAMESPACE env var to the detected sln_name\n3. imageName and repositoryName come from the containerize.json config provided — use them exactly\n4. acrName is always: acrdevgbaz1doapis\n5. deploymentEnv is always: appseng-dev\n6. autoDeploy is always: false\n7. Keep all glencore-gbldn-actions/* custom action references unchanged\n8. Keep the full test and code coverage steps\n9. The reusable workflow reference stays exactly as in the reference\n\nRULES FOR Program.cs health check insertion (minimal_api pattern):\n1. Add builder.Services.AddHealthChecks() with DB probe (if db detected) after the last builder.Services.Add* call\n2. Add app.MapHealthChecks(\"/health/live\") and app.MapHealthChecks(\"/health/ready\") before app.Run()\n3. Preserve every single existing line exactly — do not reformat or reorganise\n\nRULES FOR Program.cs migration (classic pattern):\n1. Generate a proper .NET 8 minimal API Program.cs merging Startup.ConfigureServices into builder.Services.* and Startup.Configure into app.* middleware calls\n2. Custom IServiceCollection extension methods (e.g. services.AddMyAppServices()) carry over as builder.Services.AddMyAppServices() — do NOT inline them\n3. If IHostedService, BackgroundService, or constructor-injected IConfiguration/IWebHostEnvironment is found in Startup.cs, set startup_cs_can_be_deleted to false and describe what needs manual review in startup_migration_notes\n4. Add health checks in the same pass\n\nCONTEXT:\n\nFILE TREE:\n${{ steps.context.outputs.file_tree }}\n\nCONTAINERIZE.JSON OVERRIDE:\n${{ steps.config.outputs.config }}\n\nCSPROJ FILES:\n${{ steps.context.outputs.csproj_contents }}\n\nPROGRAM.CS AND STARTUP.CS:\n${{ steps.context.outputs.startup_contents }}\n\nAPPSETTINGS.JSON:\n${{ steps.context.outputs.appsettings_contents }}\n\nREFERENCE DOCKERFILE (golden template):\n${{ steps.context.outputs.ref_dockerfile }}\n\nREFERENCE WORKFLOW (golden template):\n${{ steps.context.outputs.ref_workflow }}"
-              }
-            ]
+            \"api_project_path\": \"relative path to the API .csproj\",
+            \"api_project_dir\": \"directory containing the API .csproj\",
+            \"assembly_name\": \"output assembly name without .dll\",
+            \"sln_name\": \"solution filename without extension\",
+            \"src_root\": \"src or Src or empty string if projects are at root\",
+            \"has_startup_cs\": true or false,
+            \"startup_pattern\": \"minimal_api or classic\",
+            \"db_provider\": \"npgsql or sqlserver or none\",
+            \"connection_string_name\": \"key name from appsettings e.g. DefaultConnection\",
+            \"health_check_nuget\": \"e.g. AspNetCore.HealthChecks.Npgsql or empty if no DB\",
+            \"nuget_packages_to_add\": [\"list of health check NuGet package names to add\"],
+            \"all_non_test_csproj_paths\": [\"list of all non-test .csproj paths for Dockerfile COPY layers\"]
           }
-          PAYLOAD_EOF
+
+          CONTAINERIZE.JSON OVERRIDE (use these values if provided, they take priority):
+          $CONFIG
+
+          FILE TREE:
+          $FILE_TREE
+
+          CSPROJ FILES:
+          $CSPROJ
+
+          PROGRAM.CS / STARTUP.CS:
+          $STARTUP
+
+          APPSETTINGS.JSON:
+          $APPSETTINGS"
+
+          jq -n --arg prompt "$PROMPT" '{
+            model: "claude-sonnet-4-20250514",
+            max_tokens: 1000,
+            messages: [{ role: "user", content: $prompt }]
+          }' > /tmp/call1_payload.json
 
           RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
             -H "anthropic-version: 2023-06-01" \
             -H "content-type: application/json" \
-            -d @/tmp/ai_payload.json)
+            -d @/tmp/call1_payload.json)
 
-          # Extract the text content from the response
-          AI_OUTPUT=$(echo "$RESPONSE" | jq -r '.content[0].text')
+          AI_TEXT=$(echo "$RESPONSE" | jq -r '.content[0].text')
 
-          # Validate it's valid JSON
-          echo "$AI_OUTPUT" | jq . > /dev/null 2>&1
-          if [ $? -ne 0 ]; then
-            echo "ERROR: AI response is not valid JSON"
-            echo "$AI_OUTPUT"
+          # Strip markdown fences if present
+          CLEAN=$(echo "$AI_TEXT" | sed '/^```/d')
+
+          echo "$CLEAN" | jq . > /dev/null 2>&1 || {
+            echo "ERROR: AI call 1 did not return valid JSON"
+            echo "$AI_TEXT"
             exit 1
-          fi
+          }
 
-          # Save full AI output for subsequent steps
-          echo "$AI_OUTPUT" > /tmp/ai_output.json
-          echo "AI analysis complete"
+          echo "$CLEAN" > /tmp/analysis.json
+          echo "=== Analysis result ==="
+          cat /tmp/analysis.json | jq .
 
-          # Extract key fields for logging
-          API_PROJECT=$(echo "$AI_OUTPUT" | jq -r '.analysis.api_project_path')
-          PATTERN=$(echo "$AI_OUTPUT" | jq -r '.analysis.startup_pattern')
-          DB_PROVIDER=$(echo "$AI_OUTPUT" | jq -r '.analysis.db_provider')
-          echo "Detected: api_project=$API_PROJECT | pattern=$PATTERN | db=$DB_PROVIDER"
+      - name: AI call 2 — generate Program.cs
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          ANALYSIS=$(cat /tmp/analysis.json)
+          STARTUP='${{ steps.context.outputs.startup_contents }}'
+
+          PROMPT="You are an expert .NET 8 developer. Generate an updated Program.cs file based on the analysis and existing code below.
+
+          RULES:
+          1. Return ONLY the raw C# code — no markdown, no code fences, no explanation
+          2. If startup_pattern is minimal_api: keep all existing code exactly, add builder.Services.AddHealthChecks() with DB probe after the last builder.Services call, add app.MapHealthChecks(\"/health/live\") and app.MapHealthChecks(\"/health/ready\") before app.Run()
+          3. If startup_pattern is classic: merge ConfigureServices into builder.Services.* and Configure into app.* middleware, add health checks in the same pass, delete nothing that is referenced elsewhere
+          4. If db_provider is npgsql: chain .AddNpgsql(builder.Configuration.GetConnectionString(\"CONNECTION_STRING_NAME\")) on AddHealthChecks()
+          5. If db_provider is sqlserver: chain .AddSqlServer(builder.Configuration.GetConnectionString(\"CONNECTION_STRING_NAME\")) on AddHealthChecks()
+          6. If db_provider is none: just AddHealthChecks() with no chain
+          7. Custom extension methods like services.AddMyServices() carry over as builder.Services.AddMyServices() — do NOT inline them
+          8. Preserve the partial class Program {} at the bottom if it exists
+
+          ANALYSIS:
+          $ANALYSIS
+
+          EXISTING PROGRAM.CS / STARTUP.CS:
+          $STARTUP"
+
+          jq -n --arg prompt "$PROMPT" '{
+            model: "claude-sonnet-4-20250514",
+            max_tokens: 4000,
+            messages: [{ role: "user", content: $prompt }]
+          }' > /tmp/call2_payload.json
+
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d @/tmp/call2_payload.json)
+
+          AI_TEXT=$(echo "$RESPONSE" | jq -r '.content[0].text')
+          echo "$AI_TEXT" | sed '/^```/d' > /tmp/program_cs.txt
+
+          echo "=== First 15 lines of generated Program.cs ==="
+          head -15 /tmp/program_cs.txt
+
+      - name: AI call 3 — generate Dockerfile
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          ANALYSIS=$(cat /tmp/analysis.json)
+          REF_DOCKERFILE='${{ steps.context.outputs.ref_dockerfile }}'
+
+          PROMPT="You are an expert Docker/DevOps engineer. Generate a Dockerfile for this .NET 8 Web API based on the reference template and analysis below.
+
+          RULES:
+          1. Return ONLY the raw Dockerfile content — no markdown, no code fences, no explanation
+          2. Keep the exact same structure as the reference Dockerfile
+          3. Replace COPY lines with the correct .csproj paths from all_non_test_csproj_paths in the analysis — one COPY line per .csproj
+          4. The COPY src/ . line must use the correct src_root from the analysis
+          5. dotnet restore and dotnet publish must target the api_project_path
+          6. ENTRYPOINT must use the assembly_name from the analysis
+          7. Keep Artifactory NuGet setup exactly as in the reference
+          8. Keep EXPOSE 8080 and EXPOSE 8081
+          9. Keep all other lines identical to the reference
+
+          ANALYSIS:
+          $ANALYSIS
+
+          REFERENCE DOCKERFILE:
+          $REF_DOCKERFILE"
+
+          jq -n --arg prompt "$PROMPT" '{
+            model: "claude-sonnet-4-20250514",
+            max_tokens: 2000,
+            messages: [{ role: "user", content: $prompt }]
+          }' > /tmp/call3_payload.json
+
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d @/tmp/call3_payload.json)
+
+          AI_TEXT=$(echo "$RESPONSE" | jq -r '.content[0].text')
+          echo "$AI_TEXT" | sed '/^```/d' > /tmp/dockerfile.txt
+
+          echo "=== Generated Dockerfile ==="
+          cat /tmp/dockerfile.txt
+
+      - name: AI call 4 — generate workflow
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          ANALYSIS=$(cat /tmp/analysis.json)
+          REF_WORKFLOW='${{ steps.context.outputs.ref_workflow }}'
+          CONFIG='${{ steps.config.outputs.config }}'
+
+          IMAGE_NAME=$(echo "$CONFIG" | jq -r '.image_name')
+          REPO_NAME=$(echo "$CONFIG" | jq -r '.repository_name')
+
+          PROMPT="You are an expert GitHub Actions engineer. Generate a build workflow YAML for this .NET 8 Web API based on the reference workflow and analysis below.
+
+          RULES:
+          1. Return ONLY the raw YAML content — no markdown, no code fences, no explanation
+          2. Keep the exact same structure as the reference workflow
+          3. Set the NAMESPACE env var to the sln_name from the analysis
+          4. Set imageName to: $IMAGE_NAME
+          5. Set repositoryName to: $REPO_NAME
+          6. acrName is always: acrdevgbaz1doapis
+          7. deploymentEnv is always: appseng-dev
+          8. autoDeploy is always: false
+          9. Keep all glencore-gbldn-actions/* references exactly as in the reference
+          10. Keep the full test and code coverage steps unchanged
+          11. The reusable workflow reference must stay exactly as in the reference
+
+          ANALYSIS:
+          $ANALYSIS
+
+          REFERENCE WORKFLOW:
+          $REF_WORKFLOW"
+
+          jq -n --arg prompt "$PROMPT" '{
+            model: "claude-sonnet-4-20250514",
+            max_tokens: 3000,
+            messages: [{ role: "user", content: $prompt }]
+          }' > /tmp/call4_payload.json
+
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d @/tmp/call4_payload.json)
+
+          AI_TEXT=$(echo "$RESPONSE" | jq -r '.content[0].text')
+          echo "$AI_TEXT" | sed '/^```/d' > /tmp/workflow.txt
+
+          echo "=== First 20 lines of generated workflow ==="
+          head -20 /tmp/workflow.txt
+
+      - name: AI call 5 — generate PR description
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          ANALYSIS=$(cat /tmp/analysis.json)
+
+          PROMPT="You are a senior developer writing a GitHub Pull Request description. Based on the analysis below, write a clear markdown PR description summarising what changes were made to containerise this .NET 8 Web API for Tanzu deployment. Include sections for: Summary, Changes Made, Health Checks Added, NuGet Changes. Keep it concise and professional. Return only the markdown text, no code fences.
+
+          ANALYSIS:
+          $ANALYSIS"
+
+          jq -n --arg prompt "$PROMPT" '{
+            model: "claude-sonnet-4-20250514",
+            max_tokens: 1000,
+            messages: [{ role: "user", content: $prompt }]
+          }' > /tmp/call5_payload.json
+
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d @/tmp/call5_payload.json)
+
+          AI_TEXT=$(echo "$RESPONSE" | jq -r '.content[0].text')
+          echo "$AI_TEXT" > /tmp/pr_description.txt
+          echo "PR description generated"
 
       # -----------------------------------------------------------------------
       # 7. Apply generated files
       # -----------------------------------------------------------------------
       - name: Write Dockerfile
         run: |
-          AI_OUTPUT=$(cat /tmp/ai_output.json)
-          echo "$AI_OUTPUT" | jq -r '.dockerfile' | sed '/^```/d' > Dockerfile
+          cat /tmp/dockerfile.txt | sed '/^```/d' > Dockerfile
           echo "Dockerfile written"
-          # cat Dockerfile
+          cat Dockerfile
 
       - name: Write GitHub Actions workflow
         run: |
-          AI_OUTPUT=$(cat /tmp/ai_output.json)
           mkdir -p .github/workflows
-          echo "$AI_OUTPUT" | jq -r '.workflow' | sed '/^```/d' > .github/workflows/build.yml
+          cat /tmp/workflow.txt | sed '/^```/d' > .github/workflows/build.yml
           echo "Workflow written"
 
       - name: Debug AI output
@@ -188,51 +375,42 @@ jobs:
           cat /tmp/ai_output.json | jq '.analysis'
           echo "=== program_cs field ==="
           cat /tmp/ai_output.json | jq '.program_cs' | head -20
-          # echo "=== Keys in AI output ==="
-          # cat /tmp/ai_output.json | jq 'keys'
+          echo "=== Keys in AI output ==="
+          cat /tmp/ai_output.json | jq 'keys'
 
       - name: Write updated Program.cs
         run: |
-          AI_OUTPUT=$(cat /tmp/ai_output.json)
-          API_PROJECT_DIR=$(echo "$AI_OUTPUT" | jq -r '.analysis.api_project_dir // empty')
+          ANALYSIS=$(cat /tmp/analysis.json)
+          API_PROJECT_DIR=$(echo "$ANALYSIS" | jq -r '.api_project_dir // empty')
 
           if [ -z "$API_PROJECT_DIR" ]; then
             API_CSPROJ=$(find . -not -path './.git/*' -not -path './.reference/*' \
               -name "*.csproj" | grep -iv "test" | head -1)
             API_PROJECT_DIR=$(dirname "$API_CSPROJ")
-            echo "Derived api_project_dir: $API_PROJECT_DIR"
           fi
 
-          PROGRAM_CS_PATH="$API_PROJECT_DIR/Program.cs"
+          PROGRAM_CS_CONTENT=$(cat /tmp/program_cs.txt)
 
-          PROGRAM_CS_CONTENT=$(echo "$AI_OUTPUT" | jq -r '.program_cs // empty')
-
-          # Guard — if AI returned null/empty, keep the original file untouched
           if [ -z "$PROGRAM_CS_CONTENT" ] || [ "$PROGRAM_CS_CONTENT" = "null" ]; then
             echo "WARNING: AI returned empty program_cs — keeping original file untouched"
-            echo "The health check insertion will need to be done manually — see PR description"
           else
-            echo "$PROGRAM_CS_CONTENT" | sed '/^```/d' > "$PROGRAM_CS_PATH"
-            echo "Program.cs written to $PROGRAM_CS_PATH"
-            echo "--- First 10 lines ---"
-            head -10 "$PROGRAM_CS_PATH"
+            echo "$PROGRAM_CS_CONTENT" | sed '/^```/d' > "$API_PROJECT_DIR/Program.cs"
+            echo "Program.cs written to $API_PROJECT_DIR/Program.cs"
+            head -10 "$API_PROJECT_DIR/Program.cs"
           fi
 
       - name: Delete Startup.cs if safe to remove
         run: |
-          AI_OUTPUT=$(cat /tmp/ai_output.json)
-          CAN_DELETE=$(echo "$AI_OUTPUT" | jq -r '.startup_cs_can_be_deleted')
-          if [ "$CAN_DELETE" = "true" ]; then
-            STARTUP_PATH=$(find . -not -path './.git/*' -not -path './.reference/*' -name "Startup.cs" | head -1)
+          ANALYSIS=$(cat /tmp/analysis.json)
+          HAS_STARTUP=$(echo "$ANALYSIS" | jq -r '.has_startup_cs')
+          if [ "$HAS_STARTUP" = "true" ]; then
+            STARTUP_PATH=$(find . -not -path './.git/*' -not -path './.reference/*' \
+              -name "Startup.cs" | grep -iv "test" | head -1)
             if [ -n "$STARTUP_PATH" ]; then
               rm "$STARTUP_PATH"
               echo "Startup.cs deleted: $STARTUP_PATH"
             fi
-          else
-            NOTES=$(echo "$AI_OUTPUT" | jq -r '.startup_migration_notes')
-            echo "Startup.cs kept — manual review needed: $NOTES"
           fi
-
       # -----------------------------------------------------------------------
       # 8. Add health check NuGet packages
       # -----------------------------------------------------------------------
@@ -298,10 +476,10 @@ jobs:
             echo "csproj from AI output: $API_CSPROJ"
           fi
 
-          # echo "Restoring: $API_CSPROJ"
-          # dotnet restore "$API_CSPROJ"
-          # dotnet build "$API_CSPROJ" --configuration Release --no-restore
-          # echo "Build verification passed"
+          echo "Restoring: $API_CSPROJ"
+          dotnet restore "$API_CSPROJ"
+          dotnet build "$API_CSPROJ" --configuration Release --no-restore
+          echo "Build verification passed"
 
       # -----------------------------------------------------------------------
       # 11. Raise Pull Request
@@ -311,7 +489,8 @@ jobs:
           GH_TOKEN: ${{ secrets.CONTAINERIZE_PAT }}
         run: |
           AI_OUTPUT=$(cat /tmp/ai_output.json)
-          PR_BODY=$(echo "$AI_OUTPUT" | jq -r '.pr_description')
+          PR_BODY=$(cat /tmp/pr_description.txt)
+          #PR_BODY=$(echo "$AI_OUTPUT" | jq -r '.pr_description')
           MIGRATION_NOTES=$(echo "$AI_OUTPUT" | jq -r '.startup_migration_notes')
           CAN_DELETE=$(echo "$AI_OUTPUT" | jq -r '.startup_cs_can_be_deleted')
 
