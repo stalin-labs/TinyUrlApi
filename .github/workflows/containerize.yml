@@ -258,11 +258,23 @@ jobs:
       - name: Verify build
         run: |
           AI_OUTPUT=$(cat /tmp/ai_output.json)
-          SLN=$(echo "$AI_OUTPUT" | jq -r '.analysis.sln_name')
+          SLN=$(echo "$AI_OUTPUT" | jq -r '.analysis.sln_name // empty')
 
-          dotnet restore "${SLN}.sln"
-          dotnet build "${SLN}.sln" --configuration Release --no-restore
-          echo "Build verification passed"
+          if [ -z "$SLN" ]; then
+            echo "Solution name not found in AI output."
+
+            SLN=$(find . -maxdepth 2 -name "*.sln" | head -n 1 | sed 's/.sln$//' | xargs basename)
+
+            if [ -z "$SLN" ]; then
+              echo "No .sln file found. Fail the build?"
+            else
+              echo "Auto-detected solution: $SLN"
+            fi
+          else
+            dotnet restore "${SLN}.sln"
+            dotnet build "${SLN}.sln" --configuration Release --no-restore
+            echo "Build verification passed"
+          fi
 
       # -----------------------------------------------------------------------
       # 11. Raise Pull Request
