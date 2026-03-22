@@ -1,0 +1,299 @@
+name: Containerize for Tanzu
+
+on:
+  workflow_dispatch:
+
+jobs:
+  containerize:
+    runs-on: ubuntu-latest
+    permissions: write-all
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Checkout target repo
+      # -----------------------------------------------------------------------
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # -----------------------------------------------------------------------
+      # 2. Clone reference repo to get golden Dockerfile + workflow template
+      # -----------------------------------------------------------------------
+      - name: Checkout reference repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.CONTAINERIZE_REFERENCE_REPO }}
+          token: ${{ secrets.CONTAINERIZE_PAT }}
+          path: .reference
+
+      # -----------------------------------------------------------------------
+      # 3. Setup tools
+      # -----------------------------------------------------------------------
+      - name: Setup .NET Core SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install dotnet-outdated tool
+        run: dotnet tool install --global dotnet-outdated-tool
+
+      # -----------------------------------------------------------------------
+      # 4. Read containerize.json override (if present)
+      # -----------------------------------------------------------------------
+      - name: Read containerize.json
+        id: config
+        run: |
+          if [ -f "containerize.json" ]; then
+            echo "override=true" >> $GITHUB_OUTPUT
+            echo "config=$(cat containerize.json | jq -c .)" >> $GITHUB_OUTPUT
+          else
+            echo "override=false" >> $GITHUB_OUTPUT
+            echo "config={}" >> $GITHUB_OUTPUT
+          fi
+
+      # -----------------------------------------------------------------------
+      # 5. Collect repo context for AI analysis
+      # -----------------------------------------------------------------------
+      - name: Collect repo context
+        id: context
+        run: |
+          # Collect file tree (csproj + appsettings + sln + cs files relevant to startup)
+          FILE_TREE=$(find . -not -path './.git/*' -not -path './.reference/*' \
+            \( -name "*.csproj" -o -name "*.sln" -o -name "appsettings*.json" \
+               -o -name "Program.cs" -o -name "Startup.cs" \) \
+            | sort)
+
+          echo "file_tree<<EOF" >> $GITHUB_OUTPUT
+          echo "$FILE_TREE" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          # Collect all .csproj contents
+          CSPROJ_CONTENTS=""
+          while IFS= read -r f; do
+            CSPROJ_CONTENTS+="=== FILE: $f ===\n$(cat "$f")\n\n"
+          done < <(find . -not -path './.git/*' -not -path './.reference/*' -name "*.csproj")
+
+          echo "csproj_contents<<EOF" >> $GITHUB_OUTPUT
+          printf "%b" "$CSPROJ_CONTENTS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          # Collect Program.cs and Startup.cs contents
+          STARTUP_CONTENTS=""
+          for f in $(find . -not -path './.git/*' -not -path './.reference/*' \
+            \( -name "Program.cs" -o -name "Startup.cs" \)); do
+            STARTUP_CONTENTS+="=== FILE: $f ===\n$(cat "$f")\n\n"
+          done
+
+          echo "startup_contents<<EOF" >> $GITHUB_OUTPUT
+          printf "%b" "$STARTUP_CONTENTS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          # Collect appsettings.json
+          APPSETTINGS_CONTENTS=""
+          for f in $(find . -not -path './.git/*' -not -path './.reference/*' -name "appsettings.json"); do
+            APPSETTINGS_CONTENTS+="=== FILE: $f ===\n$(cat "$f")\n\n"
+          done
+
+          echo "appsettings_contents<<EOF" >> $GITHUB_OUTPUT
+          printf "%b" "$APPSETTINGS_CONTENTS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          # Collect .sln filename
+          SLN_FILE=$(find . -maxdepth 2 -name "*.sln" | head -1)
+          SLN_NAME=$(basename "$SLN_FILE" .sln)
+          echo "sln_name=$SLN_NAME" >> $GITHUB_OUTPUT
+          echo "sln_file=$SLN_FILE" >> $GITHUB_OUTPUT
+
+          # Read reference Dockerfile and workflow templates
+          REF_DOCKERFILE=$(cat .reference/${{ vars.REFERENCE_DOCKERFILE_PATH }})
+          REF_WORKFLOW=$(cat .reference/${{ vars.REFERENCE_WORKFLOW_PATH }})
+
+          echo "ref_dockerfile<<EOF" >> $GITHUB_OUTPUT
+          echo "$REF_DOCKERFILE" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "ref_workflow<<EOF" >> $GITHUB_OUTPUT
+          echo "$REF_WORKFLOW" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # -----------------------------------------------------------------------
+      # 6. AI analysis — generate all adapted files
+      # -----------------------------------------------------------------------
+      - name: AI analysis and file generation
+        id: ai
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          cat > /tmp/ai_payload.json << 'PAYLOAD_EOF'
+          {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 8000,
+            "messages": [
+              {
+                "role": "user",
+                "content": "SYSTEM INSTRUCTIONS:\nYou are an expert .NET DevOps engineer. Analyse the provided repository context and generate containerisation artefacts. You MUST respond with ONLY a valid JSON object — no markdown, no explanation, no preamble.\n\nRESPONSE SCHEMA:\n{\n  \"analysis\": {\n    \"api_project_path\": \"relative path to the API .csproj\",\n    \"api_project_dir\": \"directory containing the API .csproj\",\n    \"assembly_name\": \"output assembly name without .dll\",\n    \"sln_name\": \"solution filename without extension\",\n    \"src_root\": \"src or Src or empty string if projects are at root\",\n    \"has_startup_cs\": true or false,\n    \"startup_pattern\": \"minimal_api or classic\",\n    \"db_dependencies\": [\"list of detected DB packages e.g. Npgsql, SqlClient, Dapper\"],\n    \"db_provider\": \"npgsql or sqlserver or none\",\n    \"connection_string_name\": \"name of connection string key in appsettings or DefaultConnection\",\n    \"health_check_nuget\": \"exact NuGet package name for health check e.g. AspNetCore.HealthChecks.Npgsql or AspNetCore.HealthChecks.SqlServer or empty if no DB\",\n    \"nuget_packages_to_add\": [\"list of all health check NuGet packages to add\"]\n  },\n  \"program_cs\": \"FULL updated Program.cs content with health checks added. If classic pattern, this is the fully merged Program.cs combining Startup.cs ConfigureServices and Configure. Preserve all existing code exactly.\",\n  \"startup_cs_can_be_deleted\": true or false,\n  \"startup_migration_notes\": \"empty string if clean migration, otherwise describe what needs manual review\",\n  \"dockerfile\": \"FULL Dockerfile content adapted from the reference template for this specific repo\",\n  \"workflow\": \"FULL GitHub Actions workflow YAML adapted from the reference template for this specific repo\",\n  \"pr_description\": \"Markdown PR description summarising all changes made\"\n}\n\nRULES FOR Dockerfile generation:\n1. Keep the exact same structure as the reference Dockerfile\n2. Replace all hardcoded project-specific COPY lines with the correct paths for THIS repo\n3. Use per-.csproj COPY lines (one per .csproj found, excluding test projects) — NOT a single COPY src/\n4. Set the correct ENTRYPOINT using the detected assembly_name\n5. Keep Artifactory NuGet source setup exactly as in the reference\n6. Keep EXPOSE 8080 and EXPOSE 8081\n7. The COPY src/ . line should use the correct src_root\n8. dotnet restore and dotnet publish should target the API .csproj path relative to WORKDIR /src\n\nRULES FOR workflow generation:\n1. Keep the exact same structure as the reference workflow\n2. Set NAMESPACE env var to the detected sln_name\n3. imageName and repositoryName come from the containerize.json config provided — use them exactly\n4. acrName is always: acrdevgbaz1doapis\n5. deploymentEnv is always: appseng-dev\n6. autoDeploy is always: false\n7. Keep all glencore-gbldn-actions/* custom action references unchanged\n8. Keep the full test and code coverage steps\n9. The reusable workflow reference stays exactly as in the reference\n\nRULES FOR Program.cs health check insertion (minimal_api pattern):\n1. Add builder.Services.AddHealthChecks() with DB probe (if db detected) after the last builder.Services.Add* call\n2. Add app.MapHealthChecks(\"/health/live\") and app.MapHealthChecks(\"/health/ready\") before app.Run()\n3. Preserve every single existing line exactly — do not reformat or reorganise\n\nRULES FOR Program.cs migration (classic pattern):\n1. Generate a proper .NET 8 minimal API Program.cs merging Startup.ConfigureServices into builder.Services.* and Startup.Configure into app.* middleware calls\n2. Custom IServiceCollection extension methods (e.g. services.AddMyAppServices()) carry over as builder.Services.AddMyAppServices() — do NOT inline them\n3. If IHostedService, BackgroundService, or constructor-injected IConfiguration/IWebHostEnvironment is found in Startup.cs, set startup_cs_can_be_deleted to false and describe what needs manual review in startup_migration_notes\n4. Add health checks in the same pass\n\nCONTEXT:\n\nFILE TREE:\n${{ steps.context.outputs.file_tree }}\n\nCONTAINERIZE.JSON OVERRIDE:\n${{ steps.config.outputs.config }}\n\nCSPROJ FILES:\n${{ steps.context.outputs.csproj_contents }}\n\nPROGRAM.CS AND STARTUP.CS:\n${{ steps.context.outputs.startup_contents }}\n\nAPPSETTINGS.JSON:\n${{ steps.context.outputs.appsettings_contents }}\n\nREFERENCE DOCKERFILE (golden template):\n${{ steps.context.outputs.ref_dockerfile }}\n\nREFERENCE WORKFLOW (golden template):\n${{ steps.context.outputs.ref_workflow }}"
+              }
+            ]
+          }
+          PAYLOAD_EOF
+
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d @/tmp/ai_payload.json)
+
+          # Extract the text content from the response
+          AI_OUTPUT=$(echo "$RESPONSE" | jq -r '.content[0].text')
+
+          # Validate it's valid JSON
+          echo "$AI_OUTPUT" | jq . > /dev/null 2>&1
+          if [ $? -ne 0 ]; then
+            echo "ERROR: AI response is not valid JSON"
+            echo "$AI_OUTPUT"
+            exit 1
+          fi
+
+          # Save full AI output for subsequent steps
+          echo "$AI_OUTPUT" > /tmp/ai_output.json
+          echo "AI analysis complete"
+
+          # Extract key fields for logging
+          API_PROJECT=$(echo "$AI_OUTPUT" | jq -r '.analysis.api_project_path')
+          PATTERN=$(echo "$AI_OUTPUT" | jq -r '.analysis.startup_pattern')
+          DB_PROVIDER=$(echo "$AI_OUTPUT" | jq -r '.analysis.db_provider')
+          echo "Detected: api_project=$API_PROJECT | pattern=$PATTERN | db=$DB_PROVIDER"
+
+      # -----------------------------------------------------------------------
+      # 7. Apply generated files
+      # -----------------------------------------------------------------------
+      - name: Write Dockerfile
+        run: |
+          AI_OUTPUT=$(cat /tmp/ai_output.json)
+          echo "$AI_OUTPUT" | jq -r '.dockerfile' > Dockerfile
+          echo "Dockerfile written"
+          cat Dockerfile
+
+      - name: Write GitHub Actions workflow
+        run: |
+          AI_OUTPUT=$(cat /tmp/ai_output.json)
+          mkdir -p .github/workflows
+          echo "$AI_OUTPUT" | jq -r '.workflow' > .github/workflows/build.yml
+          echo "Workflow written"
+
+      - name: Write updated Program.cs
+        run: |
+          AI_OUTPUT=$(cat /tmp/ai_output.json)
+          PROGRAM_CS_PATH=$(find . -not -path './.git/*' -not -path './.reference/*' -name "Program.cs" | head -1)
+          echo "$AI_OUTPUT" | jq -r '.program_cs' > "$PROGRAM_CS_PATH"
+          echo "Program.cs written to $PROGRAM_CS_PATH"
+
+      - name: Delete Startup.cs if safe to remove
+        run: |
+          AI_OUTPUT=$(cat /tmp/ai_output.json)
+          CAN_DELETE=$(echo "$AI_OUTPUT" | jq -r '.startup_cs_can_be_deleted')
+          if [ "$CAN_DELETE" = "true" ]; then
+            STARTUP_PATH=$(find . -not -path './.git/*' -not -path './.reference/*' -name "Startup.cs" | head -1)
+            if [ -n "$STARTUP_PATH" ]; then
+              rm "$STARTUP_PATH"
+              echo "Startup.cs deleted: $STARTUP_PATH"
+            fi
+          else
+            NOTES=$(echo "$AI_OUTPUT" | jq -r '.startup_migration_notes')
+            echo "Startup.cs kept — manual review needed: $NOTES"
+          fi
+
+      # -----------------------------------------------------------------------
+      # 8. Add health check NuGet package
+      # -----------------------------------------------------------------------
+      - name: Add health check NuGet packages
+        run: |
+          AI_OUTPUT=$(cat /tmp/ai_output.json)
+          API_CSPROJ=$(echo "$AI_OUTPUT" | jq -r '.analysis.api_project_path')
+          PACKAGES=$(echo "$AI_OUTPUT" | jq -r '.analysis.nuget_packages_to_add[]')
+
+          # Setup Artifactory NuGet source
+          dotnet nuget add source ${{ secrets.ARTIFACTORY_CLOUD_URL }}/artifactory/api/nuget/v3/nuget-snapshot/index.json \
+            --name ArtifactoryCloud \
+            --username "${{ secrets.ARTIFACTORY_CLOUD_USER }}" \
+            --password "${{ secrets.ARTIFACTORY_CLOUD_ACCESS_TOKEN }}" \
+            --store-password-in-clear-text \
+            2>/dev/null || true
+
+          dotnet nuget disable source nuget.org 2>/dev/null || true
+
+          for pkg in $PACKAGES; do
+            if [ -n "$pkg" ]; then
+              echo "Adding package: $pkg"
+              dotnet add "$API_CSPROJ" package "$pkg"
+            fi
+          done
+
+      # -----------------------------------------------------------------------
+      # 9. Upgrade outdated NuGet packages
+      # -----------------------------------------------------------------------
+      - name: Upgrade outdated NuGet packages
+        run: |
+          AI_OUTPUT=$(cat /tmp/ai_output.json)
+          API_CSPROJ=$(echo "$AI_OUTPUT" | jq -r '.analysis.api_project_path')
+
+          echo "Checking for outdated packages in $API_CSPROJ..."
+          dotnet outdated "$API_CSPROJ" --upgrade --no-restore || true
+          echo "NuGet upgrade complete"
+
+      # -----------------------------------------------------------------------
+      # 10. Verify the project still builds
+      # -----------------------------------------------------------------------
+      - name: Verify build
+        run: |
+          AI_OUTPUT=$(cat /tmp/ai_output.json)
+          SLN=$(echo "$AI_OUTPUT" | jq -r '.analysis.sln_name')
+
+          dotnet restore "${SLN}.sln"
+          dotnet build "${SLN}.sln" --configuration Release --no-restore
+          echo "Build verification passed"
+
+      # -----------------------------------------------------------------------
+      # 11. Raise Pull Request
+      # -----------------------------------------------------------------------
+      - name: Create branch and raise PR
+        env:
+          GH_TOKEN: ${{ secrets.CONTAINERIZE_PAT }}
+        run: |
+          AI_OUTPUT=$(cat /tmp/ai_output.json)
+          PR_BODY=$(echo "$AI_OUTPUT" | jq -r '.pr_description')
+          MIGRATION_NOTES=$(echo "$AI_OUTPUT" | jq -r '.startup_migration_notes')
+          CAN_DELETE=$(echo "$AI_OUTPUT" | jq -r '.startup_cs_can_be_deleted')
+
+          BRANCH="containerize/tanzu"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add -A
+          git commit -m "chore: containerize for Tanzu deployment
+
+          - Add Dockerfile
+          - Add GitHub Actions build/push workflow
+          - Add health check endpoints (liveness + readiness)
+          - Upgrade NuGet packages
+          - Migrate to .NET 8 minimal API (if applicable)"
+
+          git push origin "$BRANCH" --force
+
+          # Append manual review notes to PR body if Startup.cs was kept
+          if [ "$CAN_DELETE" = "false" ] && [ -n "$MIGRATION_NOTES" ]; then
+            PR_BODY="$PR_BODY
+
+          ---
+          ## ⚠️ Manual Review Required
+          Startup.cs was not fully migrated. Please review:
+          $MIGRATION_NOTES"
+          fi
+
+          gh pr create \
+            --title "chore: containerize for Tanzu deployment" \
+            --body "$PR_BODY" \
+            --base main \
+            --head "$BRANCH" \
+            --label "containerization"
