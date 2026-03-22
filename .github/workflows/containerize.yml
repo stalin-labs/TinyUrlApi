@@ -210,8 +210,8 @@ jobs:
       - name: Add health check NuGet packages
         run: |
           AI_OUTPUT=$(cat /tmp/ai_output.json)
-          API_CSPROJ=$(echo "$AI_OUTPUT" | jq -r '.analysis.api_project_path')
-          PACKAGES=$(echo "$AI_OUTPUT" | jq -r '.analysis.nuget_packages_to_add[]')
+          API_CSPROJ=$(echo "$AI_OUTPUT" | jq -r '.analysis.api_project_path // empty')
+          PACKAGES=$(echo "$AI_OUTPUT" | jq -r '.analysis.nuget_packages_to_add // [] | .[]')
           NUGET_SOURCE=$(echo '${{ steps.config.outputs.config }}' | jq -r '.nuget_source // "artifactory"')
 
           if [ "$NUGET_SOURCE" = "artifactory" ]; then
@@ -226,6 +226,11 @@ jobs:
           else
             echo "Using public nuget.org source"
             dotnet nuget enable source nuget.org 2>/dev/null || true
+          fi
+
+          if [ -z "$API_CSPROJ" ]; then
+            echo "API project path not found. Skipping package installation."
+            exit 0
           fi
 
           for pkg in $PACKAGES; do
