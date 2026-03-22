@@ -305,8 +305,10 @@ jobs:
           CAN_DELETE=$(echo "$AI_OUTPUT" | jq -r '.startup_cs_can_be_deleted')
 
           BRANCH="containerize/tanzu"
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
           git checkout -b "$BRANCH"
           git add -A
           git commit -m "chore: containerize for Tanzu deployment
@@ -317,6 +319,7 @@ jobs:
           - Upgrade NuGet packages
           - Migrate to .NET 8 minimal API (if applicable)"
 
+          git remote set-url origin https://x-access-token:${{ secrets.CONTAINERIZE_PAT }}@github.com/${{ github.repository }}.git
           git push origin "$BRANCH" --force
 
           # Append manual review notes to PR body if Startup.cs was kept
