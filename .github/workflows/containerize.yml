@@ -182,30 +182,41 @@ jobs:
           echo "$AI_OUTPUT" | jq -r '.workflow' | sed '/^```/d' > .github/workflows/build.yml
           echo "Workflow written"
 
+      - name: Debug AI output
+        run: |
+          echo "=== AI analysis ==="
+          cat /tmp/ai_output.json | jq '.analysis'
+          echo "=== program_cs field ==="
+          cat /tmp/ai_output.json | jq '.program_cs' | head -20
+          echo "=== Keys in AI output ==="
+          cat /tmp/ai_output.json | jq 'keys'
+
       - name: Write updated Program.cs
         run: |
           AI_OUTPUT=$(cat /tmp/ai_output.json)
           API_PROJECT_DIR=$(echo "$AI_OUTPUT" | jq -r '.analysis.api_project_dir // empty')
 
-          # Fallback — derive directory from csproj path if AI output is empty
           if [ -z "$API_PROJECT_DIR" ]; then
             API_CSPROJ=$(find . -not -path './.git/*' -not -path './.reference/*' \
               -name "*.csproj" | grep -iv "test" | head -1)
             API_PROJECT_DIR=$(dirname "$API_CSPROJ")
-            echo "api_project_dir not in AI output, derived from csproj: $API_PROJECT_DIR"
-          else
-            echo "api_project_dir from AI output: $API_PROJECT_DIR"
+            echo "Derived api_project_dir: $API_PROJECT_DIR"
           fi
 
           PROGRAM_CS_PATH="$API_PROJECT_DIR/Program.cs"
 
-          echo "$AI_OUTPUT" | jq -r '.program_cs' \
-            | sed '/^```/d' \
-            > "$PROGRAM_CS_PATH"
+          PROGRAM_CS_CONTENT=$(echo "$AI_OUTPUT" | jq -r '.program_cs // empty')
 
-          echo "Program.cs written to $PROGRAM_CS_PATH"
-          echo "--- First 5 lines ---"
-          head -5 "$PROGRAM_CS_PATH"
+          # Guard — if AI returned null/empty, keep the original file untouched
+          if [ -z "$PROGRAM_CS_CONTENT" ] || [ "$PROGRAM_CS_CONTENT" = "null" ]; then
+            echo "WARNING: AI returned empty program_cs — keeping original file untouched"
+            echo "The health check insertion will need to be done manually — see PR description"
+          else
+            echo "$PROGRAM_CS_CONTENT" | sed '/^```/d' > "$PROGRAM_CS_PATH"
+            echo "Program.cs written to $PROGRAM_CS_PATH"
+            echo "--- First 10 lines ---"
+            head -10 "$PROGRAM_CS_PATH"
+          fi
 
       - name: Delete Startup.cs if safe to remove
         run: |
@@ -318,6 +329,8 @@ jobs:
           - Add health check endpoints (liveness + readiness)
           - Upgrade NuGet packages
           - Migrate to .NET 8 minimal API (if applicable)"
+
+          git config --unset-all http.https://github.com/.extraheader
 
           git remote set-url origin https://x-access-token:${{ secrets.CONTAINERIZE_PAT }}@github.com/${{ github.repository }}.git
           git push origin "$BRANCH" --force
