@@ -124,65 +124,64 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          CONFIG='${{ steps.config.outputs.config }}'
-          FILE_TREE='${{ steps.context.outputs.file_tree }}'
-          CSPROJ='${{ steps.context.outputs.csproj_contents }}'
-          STARTUP='${{ steps.context.outputs.startup_contents }}'
-          APPSETTINGS='${{ steps.context.outputs.appsettings_contents }}'
+          # Write each piece of context to temp files to avoid shell escaping issues
+          echo '${{ steps.config.outputs.config }}' > /tmp/ctx_config.txt
+          cat > /tmp/ctx_filetree.txt << 'FILETREE_EOF'
+          ${{ steps.context.outputs.file_tree }}
+          FILETREE_EOF
 
-          PROMPT="You are an expert .NET DevOps engineer. Analyse this .NET 8 Web API repository and return ONLY a valid JSON object — no markdown, no explanation, no preamble, no code fences.
+          # Write csproj and startup contents safely
+          echo '${{ steps.context.outputs.csproj_contents }}' > /tmp/ctx_csproj.txt
+          echo '${{ steps.context.outputs.startup_contents }}' > /tmp/ctx_startup.txt
+          echo '${{ steps.context.outputs.appsettings_contents }}' > /tmp/ctx_appsettings.txt
 
-          RESPONSE SCHEMA:
-          {
-            \"api_project_path\": \"relative path to the API .csproj\",
-            \"api_project_dir\": \"directory containing the API .csproj\",
-            \"assembly_name\": \"output assembly name without .dll\",
-            \"sln_name\": \"solution filename without extension\",
-            \"src_root\": \"src or Src or empty string if projects are at root\",
-            \"has_startup_cs\": true or false,
-            \"startup_pattern\": \"minimal_api or classic\",
-            \"db_provider\": \"npgsql or sqlserver or none\",
-            \"connection_string_name\": \"key name from appsettings e.g. DefaultConnection\",
-            \"health_check_nuget\": \"e.g. AspNetCore.HealthChecks.Npgsql or empty if no DB\",
-            \"nuget_packages_to_add\": [\"list of health check NuGet package names to add\"],
-            \"all_non_test_csproj_paths\": [\"list of all non-test .csproj paths for Dockerfile COPY layers\"]
-          }
+          # Build prompt safely using jq to construct the JSON payload
+          # This avoids ALL shell escaping issues with special characters
+          jq -n \
+            --rawfile config /tmp/ctx_config.txt \
+            --rawfile filetree /tmp/ctx_filetree.txt \
+            --rawfile csproj /tmp/ctx_csproj.txt \
+            --rawfile startup /tmp/ctx_startup.txt \
+            --rawfile appsettings /tmp/ctx_appsettings.txt \
+            '{
+              model: "claude-sonnet-4-20250514",
+              max_tokens: 1000,
+              messages: [{
+                role: "user",
+                content: ("You are an expert .NET DevOps engineer. Analyse this .NET 8 Web API repository and return ONLY a valid JSON object — no markdown, no explanation, no preamble, no code fences.\n\nRESPONSE SCHEMA:\n{\n  \"api_project_path\": \"relative path to the API .csproj\",\n  \"api_project_dir\": \"directory containing the API .csproj\",\n  \"assembly_name\": \"output assembly name without .dll\",\n  \"sln_name\": \"solution filename without extension\",\n  \"src_root\": \"src or Src or empty string if projects are at root\",\n  \"has_startup_cs\": false,\n  \"startup_pattern\": \"minimal_api or classic\",\n  \"db_provider\": \"npgsql or sqlserver or none\",\n  \"connection_string_name\": \"key name from appsettings e.g. DefaultConnection\",\n  \"health_check_nuget\": \"e.g. AspNetCore.HealthChecks.Npgsql or empty if no DB\",\n  \"nuget_packages_to_add\": [],\n  \"all_non_test_csproj_paths\": []\n}\n\nCONTAINERIZE.JSON OVERRIDE:\n" + $config + "\n\nFILE TREE:\n" + $filetree + "\n\nCSPROJ FILES:\n" + $csproj + "\n\nPROGRAM.CS / STARTUP.CS:\n" + $startup + "\n\nAPPSETTINGS.JSON:\n" + $appsettings)
+              }]
+            }' > /tmp/call1_payload.json
 
-          CONTAINERIZE.JSON OVERRIDE (use these values if provided, they take priority):
-          $CONFIG
+          echo "=== Payload size ==="
+          wc -c /tmp/call1_payload.json
 
-          FILE TREE:
-          $FILE_TREE
-
-          CSPROJ FILES:
-          $CSPROJ
-
-          PROGRAM.CS / STARTUP.CS:
-          $STARTUP
-
-          APPSETTINGS.JSON:
-          $APPSETTINGS"
-
-          jq -n --arg prompt "$PROMPT" '{
-            model: "claude-sonnet-4-20250514",
-            max_tokens: 1000,
-            messages: [{ role: "user", content: $prompt }]
-          }' > /tmp/call1_payload.json
-
-          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+          echo "=== Calling Anthropic API ==="
+          HTTP_CODE=$(curl -s -o /tmp/call1_response.json -w "%{http_code}" \
+            https://api.anthropic.com/v1/messages \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
             -H "anthropic-version: 2023-06-01" \
             -H "content-type: application/json" \
             -d @/tmp/call1_payload.json)
 
-          AI_TEXT=$(echo "$RESPONSE" | jq -r '.content[0].text')
+          echo "=== HTTP status code: $HTTP_CODE ==="
+          echo "=== Raw API response ==="
+          cat /tmp/call1_response.json
 
-          # Strip markdown fences if present
+          # Check for API errors
+          ERROR=$(cat /tmp/call1_response.json | jq -r '.error.message // empty')
+          if [ -n "$ERROR" ]; then
+            echo "ERROR from Anthropic API: $ERROR"
+            exit 1
+          fi
+
+          AI_TEXT=$(cat /tmp/call1_response.json | jq -r '.content[0].text // empty')
           CLEAN=$(echo "$AI_TEXT" | sed '/^```/d')
 
+          echo "=== AI text ==="
+          echo "$CLEAN"
+
           echo "$CLEAN" | jq . > /dev/null 2>&1 || {
-            echo "ERROR: AI call 1 did not return valid JSON"
-            echo "$AI_TEXT"
+            echo "ERROR: Response is not valid JSON"
             exit 1
           }
 
