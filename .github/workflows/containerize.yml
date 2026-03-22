@@ -350,4 +350,3 @@ jobs:
             --body "$PR_BODY" \
             --base main \
             --head "$BRANCH" \
-            --label "containerization"
