@@ -171,23 +171,41 @@ jobs:
       - name: Write Dockerfile
         run: |
           AI_OUTPUT=$(cat /tmp/ai_output.json)
-          echo "$AI_OUTPUT" | jq -r '.dockerfile' > Dockerfile
+          echo "$AI_OUTPUT" | jq -r '.dockerfile' | sed '/^```/d' > Dockerfile
           echo "Dockerfile written"
-          cat Dockerfile
+          # cat Dockerfile
 
       - name: Write GitHub Actions workflow
         run: |
           AI_OUTPUT=$(cat /tmp/ai_output.json)
           mkdir -p .github/workflows
-          echo "$AI_OUTPUT" | jq -r '.workflow' > .github/workflows/build.yml
+          echo "$AI_OUTPUT" | jq -r '.workflow' | sed '/^```/d' > .github/workflows/build.yml
           echo "Workflow written"
 
       - name: Write updated Program.cs
         run: |
           AI_OUTPUT=$(cat /tmp/ai_output.json)
-          PROGRAM_CS_PATH=$(find . -not -path './.git/*' -not -path './.reference/*' -name "Program.cs" | head -1)
-          echo "$AI_OUTPUT" | jq -r '.program_cs' > "$PROGRAM_CS_PATH"
+          API_PROJECT_DIR=$(echo "$AI_OUTPUT" | jq -r '.analysis.api_project_dir // empty')
+
+          # Fallback — derive directory from csproj path if AI output is empty
+          if [ -z "$API_PROJECT_DIR" ]; then
+            API_CSPROJ=$(find . -not -path './.git/*' -not -path './.reference/*' \
+              -name "*.csproj" | grep -iv "test" | head -1)
+            API_PROJECT_DIR=$(dirname "$API_CSPROJ")
+            echo "api_project_dir not in AI output, derived from csproj: $API_PROJECT_DIR"
+          else
+            echo "api_project_dir from AI output: $API_PROJECT_DIR"
+          fi
+
+          PROGRAM_CS_PATH="$API_PROJECT_DIR/Program.cs"
+
+          echo "$AI_OUTPUT" | jq -r '.program_cs' \
+            | sed '/^```/d' \
+            > "$PROGRAM_CS_PATH"
+
           echo "Program.cs written to $PROGRAM_CS_PATH"
+          echo "--- First 5 lines ---"
+          head -5 "$PROGRAM_CS_PATH"
 
       - name: Delete Startup.cs if safe to remove
         run: |
