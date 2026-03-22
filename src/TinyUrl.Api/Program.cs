@@ -15,7 +15,7 @@ builder.Services.Configure<TinyUrlOptions>(builder.Configuration.GetSection(Tiny
 builder.Services.AddScoped<IRepository>(sp =>
 {
     var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
-        ?? throw new InvalidOperationException("Connection string 'DefaultConnection' is not configured.");
+        ?? throw new InvalidOperationException("Connection string DefaultConnection is not configured.");
     return new PostgresRepository(connectionString);
 });
 
@@ -35,6 +35,9 @@ builder.Services.AddSwaggerGen(c =>
     c.SwaggerDoc("v1", new() { Title = "TinyUrl API", Version = "v1" });
 });
 
+builder.Services.AddHealthChecks()
+    .AddNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")!, tags: new[] { "ready" });
+
 // ---------------------------------------------------------------------------
 // Middleware pipeline
 // ---------------------------------------------------------------------------
@@ -49,6 +52,19 @@ if (app.Environment.IsDevelopment())
 app.UseHttpsRedirection();
 app.UseAuthorization();
 app.MapControllers();
+
+app.MapHealthChecks("/live", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+{
+    Predicate = _ => false
+});
+app.MapHealthChecks("/ready", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready")
+});
+app.MapHealthChecks("/startup", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+{
+    Predicate = _ => false
+});
 
 app.Run();
 
