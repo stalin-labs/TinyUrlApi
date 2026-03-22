@@ -205,23 +205,28 @@ jobs:
           fi
 
       # -----------------------------------------------------------------------
-      # 8. Add health check NuGet package
+      # 8. Add health check NuGet packages
       # -----------------------------------------------------------------------
       - name: Add health check NuGet packages
         run: |
           AI_OUTPUT=$(cat /tmp/ai_output.json)
           API_CSPROJ=$(echo "$AI_OUTPUT" | jq -r '.analysis.api_project_path')
           PACKAGES=$(echo "$AI_OUTPUT" | jq -r '.analysis.nuget_packages_to_add[]')
+          NUGET_SOURCE=$(echo '${{ steps.config.outputs.config }}' | jq -r '.nuget_source // "artifactory"')
 
-          # Setup Artifactory NuGet source
-          dotnet nuget add source ${{ secrets.ARTIFACTORY_CLOUD_URL }}/artifactory/api/nuget/v3/nuget-snapshot/index.json \
-            --name ArtifactoryCloud \
-            --username "${{ secrets.ARTIFACTORY_CLOUD_USER }}" \
-            --password "${{ secrets.ARTIFACTORY_CLOUD_ACCESS_TOKEN }}" \
-            --store-password-in-clear-text \
-            2>/dev/null || true
-
-          dotnet nuget disable source nuget.org 2>/dev/null || true
+          if [ "$NUGET_SOURCE" = "artifactory" ]; then
+            echo "Using Artifactory NuGet source"
+            dotnet nuget add source ${{ secrets.ARTIFACTORY_CLOUD_URL }}/artifactory/api/nuget/v3/nuget-snapshot/index.json \
+              --name ArtifactoryCloud \
+              --username "${{ secrets.ARTIFACTORY_CLOUD_USER }}" \
+              --password "${{ secrets.ARTIFACTORY_CLOUD_ACCESS_TOKEN }}" \
+              --store-password-in-clear-text \
+              2>/dev/null || true
+            dotnet nuget disable source nuget.org 2>/dev/null || true
+          else
+            echo "Using public nuget.org source"
+            dotnet nuget enable source nuget.org 2>/dev/null || true
+          fi
 
           for pkg in $PACKAGES; do
             if [ -n "$pkg" ]; then
