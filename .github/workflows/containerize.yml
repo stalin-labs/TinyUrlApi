@@ -120,14 +120,6 @@ jobs:
       # -----------------------------------------------------------------------
       # 6. AI analysis and file generation — split into focused calls
       # -----------------------------------------------------------------------
-      - name: Debug secrets
-        run: |
-          if [ -z "${{ secrets.ANTHROPIC_API_KEY }}" ]; then
-            echo "ERROR: ANTHROPIC_API_KEY is empty or not set"
-          else
-            echo "ANTHROPIC_API_KEY is set — starts with: $(echo '${{ secrets.ANTHROPIC_API_KEY }}' | cut -c1-10)..."
-          fi
-
       - name: AI call 1 — analyse repo structure
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -152,7 +144,7 @@ jobs:
             --rawfile startup /tmp/ctx_startup.txt \
             --rawfile appsettings /tmp/ctx_appsettings.txt \
             '{
-              model: "claude-sonnet-4-20250514",
+              model: "claude-haiku-4-5-20251001",
               max_tokens: 1000,
               messages: [{
                 role: "user",
@@ -405,6 +397,10 @@ jobs:
               -name "*.csproj" | grep -iv "test" | head -1)
           fi
 
+          echo "=== API csproj: $API_CSPROJ ==="
+          echo "=== Packages to add ==="
+          echo "$PACKAGES"
+
           NUGET_SOURCE=$(echo '${{ steps.config.outputs.config }}' | jq -r '.nuget_source // "artifactory"')
 
           if [ "$NUGET_SOURCE" = "artifactory" ]; then
@@ -420,12 +416,19 @@ jobs:
             dotnet nuget enable source nuget.org 2>/dev/null || true
           fi
 
+          echo "=== Current NuGet sources ==="
+          dotnet nuget list source
+
           for pkg in $PACKAGES; do
             if [ -n "$pkg" ]; then
-              echo "Adding package: $pkg"
+              echo "=== Adding package: $pkg ==="
               dotnet add "$API_CSPROJ" package "$pkg"
+              echo "=== Exit code: $? ==="
             fi
           done
+
+          echo "=== Final csproj contents ==="
+          cat "$API_CSPROJ"
 
       # -----------------------------------------------------------------------
       # 9. Upgrade outdated NuGet packages
@@ -470,7 +473,35 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: containerize-debug
+          path: |
+            /tmp/analysis.json
+            /tmp/program_cs.txt
+            /tmp/dockerfile.txt
+            /tmp/workflow.txt
+            /tmp/call1_payload.json
+            /tmp/call1_response.json
+            /tmp/call2_payload.json
+            /tmp/call2_response.json
+            /tmp/call3_payload.json
+            /tmp/call3_response.json
+            /tmp/call4_payload.json
+            /tmp/call4_response.json
+            /tmp/ctx_config.txt
+            /tmp/ctx_filetree.txt
+            /tmp/ctx_csproj.txt
+            /tmp/ctx_startup.txt
+            /tmp/ctx_appsettings.txt
+            /tmp/ctx_ref_dockerfile.txt
+            /tmp/ctx_ref_workflow.txt
+          retention-days: 7
+
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: containerize-debug
           path: /tmp/
+          exclude-path: /tmp/snap-private-tmp
           # path: |
           #   /tmp/analysis.json
           #   /tmp/program_cs.txt
