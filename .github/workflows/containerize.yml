@@ -205,7 +205,7 @@ jobs:
               max_tokens: 4000,
               messages: [{
                 role: "user",
-                content: ("You are an expert .NET 8 developer. Generate an updated Program.cs file based on the analysis and existing code below.\n\nRULES:\n1. Return ONLY raw C# code — no markdown, no code fences, no explanation\n2. If startup_pattern is minimal_api: keep all existing code exactly, add builder.Services.AddHealthChecks() with DB probe after the last builder.Services call, add app.MapHealthChecks(\"/health/live\") and app.MapHealthChecks(\"/health/ready\") before app.Run()\n3. If startup_pattern is classic: merge ConfigureServices into builder.Services.* and Configure into app.* middleware, add health checks in the same pass\n4. If db_provider is npgsql: chain .AddNpgsql(builder.Configuration.GetConnectionString(\"<connection_string_name>\")) on AddHealthChecks()\n5. If db_provider is sqlserver: chain .AddSqlServer(builder.Configuration.GetConnectionString(\"<connection_string_name>\")) on AddHealthChecks()\n6. If db_provider is none: just AddHealthChecks() with no chain\n7. Custom extension methods carry over as-is e.g. builder.Services.AddMyServices()\n8. Preserve partial class Program {} at the bottom if it exists\n9. Use the actual connection_string_name value from the analysis, not the placeholder\n\nANALYSIS:\n" + $analysis + "\n\nEXISTING PROGRAM.CS / STARTUP.CS:\n" + $startup)
+                content: ("You are an expert .NET 8 developer. Generate an updated Program.cs file based on the analysis and existing code below.\n\nRULES:\n1. Return ONLY raw C# code — no markdown, no code fences, no explanation\n2. If startup_pattern is minimal_api: keep all existing code exactly, add health checks after the last builder.Services call, add health check endpoints before app.Run()\n3. If startup_pattern is classic: merge ConfigureServices into builder.Services.* and Configure into app.* middleware, add health checks in the same pass\n4. Custom extension methods carry over as-is e.g. builder.Services.AddMyServices()\n5. Preserve partial class Program {} at the bottom if it exists\n\nCRITICAL HEALTH CHECK RULES:\n6. Always register THREE health check endpoints: /live, /ready, /startup\n7. /live and /startup must use Predicate = _ => false so NO checks run — they always return 200 Healthy immediately\n8. /ready must use Predicate = check => check.Tags.Contains(\"ready\") so ONLY tagged checks run\n9. If db_provider is npgsql: chain .AddNpgsql(builder.Configuration.GetConnectionString(\"<connection_string_name>\")!, tags: new[] { \"ready\" }) — the WithTags ensures it ONLY runs on /ready\n10. If db_provider is sqlserver: chain .AddSqlServer(builder.Configuration.GetConnectionString(\"<connection_string_name>\")!, tags: new[] { \"ready\" })\n11. If db_provider is none: just AddHealthChecks() with no chain\n12. Use the actual connection_string_name value from the analysis, not a placeholder\n13. NEVER use AddNpgSql() — always use AddNpgsql() (lowercase s)\n14. Use fully qualified Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions to avoid missing using directive errors\n\nEXPECTED HEALTH CHECK OUTPUT SHAPE:\nbuilder.Services.AddHealthChecks()\n    .AddNpgsql(builder.Configuration.GetConnectionString(\"DefaultConnection\")!, tags: new[] { \"ready\" });\n\napp.MapHealthChecks(\"/live\", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions\n{\n    Predicate = _ => false\n});\napp.MapHealthChecks(\"/ready\", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions\n{\n    Predicate = check => check.Tags.Contains(\"ready\")\n});\napp.MapHealthChecks(\"/startup\", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions\n{\n    Predicate = _ => false\n});\n\nANALYSIS:\n" + $analysis + "\n\nEXISTING PROGRAM.CS / STARTUP.CS:\n" + $startup)
               }]
             }' > /tmp/call2_payload.json
 
@@ -383,6 +383,27 @@ jobs:
               echo "Startup.cs deleted: $STARTUP_PATH"
             fi
           fi
+
+      - name: Detect .NET version
+        run: |
+          ANALYSIS=$(cat /tmp/analysis.json)
+          API_CSPROJ=$(echo "$ANALYSIS" | jq -r '.api_project_path // empty')
+
+          if [ -z "$API_CSPROJ" ]; then
+            API_CSPROJ=$(find . -not -path './.git/*' -not -path './.reference/*' \
+              -name "*.csproj" | grep -iv "test" | head -1)
+          fi
+
+          # Extract TargetFramework value e.g. net8.0, net10.0
+          TARGET_FRAMEWORK=$(grep -oPm1 '(?<=<TargetFramework>)[^<]+' "$API_CSPROJ")
+          echo "Target framework: $TARGET_FRAMEWORK"
+
+          # Extract major version number e.g. 8, 10
+          DOTNET_MAJOR=$(echo "$TARGET_FRAMEWORK" | grep -oP '\d+' | head -1)
+          echo "Detected .NET major version: $DOTNET_MAJOR"
+
+          echo "DOTNET_MAJOR=$DOTNET_MAJOR" >> $GITHUB_ENV
+
       # -----------------------------------------------------------------------
       # 8. Add health check NuGet packages
       # -----------------------------------------------------------------------
@@ -422,7 +443,7 @@ jobs:
           for pkg in $PACKAGES; do
             if [ -n "$pkg" ]; then
               echo "=== Adding package: $pkg ==="
-              dotnet add "$API_CSPROJ" package "$pkg"
+              dotnet add "$API_CSPROJ" package "$pkg" --version "${DOTNET_MAJOR}.*"
               echo "=== Exit code: $? ==="
             fi
           done
@@ -473,6 +494,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: containerize-debug
+          # path: /tmp/
           path: |
             /tmp/analysis.json
             /tmp/program_cs.txt
@@ -493,35 +515,6 @@ jobs:
             /tmp/ctx_appsettings.txt
             /tmp/ctx_ref_dockerfile.txt
             /tmp/ctx_ref_workflow.txt
-          retention-days: 7
-
-      - name: Upload debug artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: containerize-debug
-          path: /tmp/
-          exclude-path: /tmp/snap-private-tmp
-          # path: |
-          #   /tmp/analysis.json
-          #   /tmp/program_cs.txt
-          #   /tmp/dockerfile.txt
-          #   /tmp/workflow.txt
-          #   /tmp/call1_payload.json
-          #   /tmp/call1_response.json
-          #   /tmp/call2_payload.json
-          #   /tmp/call2_response.json
-          #   /tmp/call3_payload.json
-          #   /tmp/call3_response.json
-          #   /tmp/call4_payload.json
-          #   /tmp/call4_response.json
-          #   /tmp/ctx_config.txt
-          #   /tmp/ctx_filetree.txt
-          #   /tmp/ctx_csproj.txt
-          #   /tmp/ctx_startup.txt
-          #   /tmp/ctx_appsettings.txt
-          #   /tmp/ctx_ref_dockerfile.txt
-          #   /tmp/ctx_ref_workflow.txt
           retention-days: 7
 
       # -----------------------------------------------------------------------
@@ -554,7 +547,7 @@ jobs:
           **Changes made:**
           - Added \`Dockerfile\` (image: \`$ASSEMBLY\`)
           - Added \`.github/workflows/build.yml\`
-          - Added health check endpoints (\`/health/live\` and \`/health/ready\`)
+          - Added health check endpoints (\`/live\`, \`/startup\` and \`/ready\`)
           - Added health check NuGet package (db: \`$DB_PROVIDER\`)
           - Upgraded outdated NuGet packages"
 
