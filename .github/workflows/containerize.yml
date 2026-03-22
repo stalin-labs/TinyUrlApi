@@ -258,25 +258,20 @@ jobs:
       - name: Verify build
         run: |
           AI_OUTPUT=$(cat /tmp/ai_output.json)
-          SLN_NAME=$(echo "$AI_OUTPUT" | jq -r '.analysis.sln_name // empty')
+          API_CSPROJ=$(echo "$AI_OUTPUT" | jq -r '.analysis.api_project_path // empty')
 
-          # Fallback — find the .sln file directly if AI output is empty
-          if [ -z "$SLN_NAME" ]; then
-            SLN_FILE=$(find . -maxdepth 2 -not -path './.git/*' -not -path './.reference/*' -name "*.sln" | head -1)
-            if [ -z "$SLN_FILE" ]; then
-              echo "ERROR: No .sln file found"
-              exit 1
-            fi
-            SLN_NAME=$(basename "$SLN_FILE" .sln)
-            echo "SLN not in AI output, detected from filesystem: $SLN_NAME"
+          # Fallback — find the API .csproj directly if AI output is empty
+          if [ -z "$API_CSPROJ" ]; then
+            API_CSPROJ=$(find . -not -path './.git/*' -not -path './.reference/*' \
+              -name "*.csproj" | grep -iv "test" | head -1)
+            echo "csproj not in AI output, detected from filesystem: $API_CSPROJ"
           else
-            SLN_FILE=$(find . -maxdepth 2 -not -path './.git/*' -not -path './.reference/*' -name "${SLN_NAME}.sln" | head -1)
-            echo "SLN from AI output: $SLN_NAME"
+            echo "csproj from AI output: $API_CSPROJ"
           fi
 
-          echo "Building: $SLN_FILE"
-          dotnet restore "$SLN_FILE"
-          dotnet build "$SLN_FILE" --configuration Release --no-restore
+          echo "Restoring: $API_CSPROJ"
+          dotnet restore "$API_CSPROJ"
+          dotnet build "$API_CSPROJ" --configuration Release --no-restore
           echo "Build verification passed"
 
       # -----------------------------------------------------------------------
