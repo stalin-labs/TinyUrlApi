@@ -258,16 +258,25 @@ jobs:
       - name: Verify build
         run: |
           AI_OUTPUT=$(cat /tmp/ai_output.json)
+
           SLN=$(echo "$AI_OUTPUT" | jq -r '.analysis.sln_name // empty')
 
           if [ -n "$SLN" ] && [ -f "${SLN}.sln" ]; then
-            SLN="${SLN}.sln"
+            SLN_FILE="${SLN}.sln"
           else
-            SLN=$(find . -name "*.sln" | head -n 1)
+            SLN_FILE=$(find . -name "*.sln" | head -n 1)
           fi
 
-          dotnet restore "${SLN}.sln"
-          dotnet build "${SLN}.sln" --configuration Release --no-restore
+          if [ -z "$SLN_FILE" ]; then
+            echo "No solution file found"
+            exit 1
+          fi
+
+          echo "Using solution: $SLN_FILE"
+
+          dotnet restore "$SLN_FILE"
+          dotnet build "$SLN_FILE" --configuration Release --no-restore
+
           echo "Build verification passed"
 
       # -----------------------------------------------------------------------
