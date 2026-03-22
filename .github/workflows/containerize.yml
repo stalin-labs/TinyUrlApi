@@ -120,6 +120,14 @@ jobs:
       # -----------------------------------------------------------------------
       # 6. AI analysis and file generation — split into focused calls
       # -----------------------------------------------------------------------
+      - name: Debug secrets
+        run: |
+          if [ -z "${{ secrets.ANTHROPIC_API_KEY }}" ]; then
+            echo "ERROR: ANTHROPIC_API_KEY is empty or not set"
+          else
+            echo "ANTHROPIC_API_KEY is set — starts with: $(echo '${{ secrets.ANTHROPIC_API_KEY }}' | cut -c1-10)..."
+          fi
+
       - name: AI call 1 — analyse repo structure
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
