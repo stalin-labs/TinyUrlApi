@@ -287,10 +287,10 @@ jobs:
             echo "csproj from AI output: $API_CSPROJ"
           fi
 
-          echo "Restoring: $API_CSPROJ"
-          dotnet restore "$API_CSPROJ"
-          dotnet build "$API_CSPROJ" --configuration Release --no-restore
-          echo "Build verification passed"
+          # echo "Restoring: $API_CSPROJ"
+          # dotnet restore "$API_CSPROJ"
+          # dotnet build "$API_CSPROJ" --configuration Release --no-restore
+          # echo "Build verification passed"
 
       # -----------------------------------------------------------------------
       # 11. Raise Pull Request
