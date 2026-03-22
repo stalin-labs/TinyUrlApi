@@ -201,41 +201,35 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          ANALYSIS=$(cat /tmp/analysis.json)
-          STARTUP='${{ steps.context.outputs.startup_contents }}'
+          cat /tmp/analysis.json > /tmp/ctx_analysis.txt
+          cat /tmp/ctx_startup.txt > /tmp/ctx_startup2.txt 2>/dev/null || \
+            echo '${{ steps.context.outputs.startup_contents }}' > /tmp/ctx_startup2.txt
 
-          PROMPT="You are an expert .NET 8 developer. Generate an updated Program.cs file based on the analysis and existing code below.
+          jq -n \
+            --rawfile analysis /tmp/ctx_analysis.txt \
+            --rawfile startup /tmp/ctx_startup2.txt \
+            '{
+              model: "claude-sonnet-4-20250514",
+              max_tokens: 4000,
+              messages: [{
+                role: "user",
+                content: ("You are an expert .NET 8 developer. Generate an updated Program.cs file based on the analysis and existing code below.\n\nRULES:\n1. Return ONLY raw C# code — no markdown, no code fences, no explanation\n2. If startup_pattern is minimal_api: keep all existing code exactly, add builder.Services.AddHealthChecks() with DB probe after the last builder.Services call, add app.MapHealthChecks(\"/health/live\") and app.MapHealthChecks(\"/health/ready\") before app.Run()\n3. If startup_pattern is classic: merge ConfigureServices into builder.Services.* and Configure into app.* middleware, add health checks in the same pass\n4. If db_provider is npgsql: chain .AddNpgsql(builder.Configuration.GetConnectionString(\"<connection_string_name>\")) on AddHealthChecks()\n5. If db_provider is sqlserver: chain .AddSqlServer(builder.Configuration.GetConnectionString(\"<connection_string_name>\")) on AddHealthChecks()\n6. If db_provider is none: just AddHealthChecks() with no chain\n7. Custom extension methods carry over as-is e.g. builder.Services.AddMyServices()\n8. Preserve partial class Program {} at the bottom if it exists\n9. Use the actual connection_string_name value from the analysis, not the placeholder\n\nANALYSIS:\n" + $analysis + "\n\nEXISTING PROGRAM.CS / STARTUP.CS:\n" + $startup)
+              }]
+            }' > /tmp/call2_payload.json
 
-          RULES:
-          1. Return ONLY the raw C# code — no markdown, no code fences, no explanation
-          2. If startup_pattern is minimal_api: keep all existing code exactly, add builder.Services.AddHealthChecks() with DB probe after the last builder.Services call, add app.MapHealthChecks(\"/health/live\") and app.MapHealthChecks(\"/health/ready\") before app.Run()
-          3. If startup_pattern is classic: merge ConfigureServices into builder.Services.* and Configure into app.* middleware, add health checks in the same pass, delete nothing that is referenced elsewhere
-          4. If db_provider is npgsql: chain .AddNpgsql(builder.Configuration.GetConnectionString(\"CONNECTION_STRING_NAME\")) on AddHealthChecks()
-          5. If db_provider is sqlserver: chain .AddSqlServer(builder.Configuration.GetConnectionString(\"CONNECTION_STRING_NAME\")) on AddHealthChecks()
-          6. If db_provider is none: just AddHealthChecks() with no chain
-          7. Custom extension methods like services.AddMyServices() carry over as builder.Services.AddMyServices() — do NOT inline them
-          8. Preserve the partial class Program {} at the bottom if it exists
-
-          ANALYSIS:
-          $ANALYSIS
-
-          EXISTING PROGRAM.CS / STARTUP.CS:
-          $STARTUP"
-
-          jq -n --arg prompt "$PROMPT" '{
-            model: "claude-sonnet-4-20250514",
-            max_tokens: 4000,
-            messages: [{ role: "user", content: $prompt }]
-          }' > /tmp/call2_payload.json
-
-          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+          HTTP_CODE=$(curl -s -o /tmp/call2_response.json -w "%{http_code}" \
+            https://api.anthropic.com/v1/messages \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
             -H "anthropic-version: 2023-06-01" \
             -H "content-type: application/json" \
             -d @/tmp/call2_payload.json)
 
-          AI_TEXT=$(echo "$RESPONSE" | jq -r '.content[0].text')
-          echo "$AI_TEXT" | sed '/^```/d' > /tmp/program_cs.txt
+          echo "HTTP status: $HTTP_CODE"
+          ERROR=$(cat /tmp/call2_response.json | jq -r '.error.message // empty')
+          if [ -n "$ERROR" ]; then echo "API ERROR: $ERROR"; exit 1; fi
+
+          cat /tmp/call2_response.json | jq -r '.content[0].text // empty' \
+            | sed '/^```/d' > /tmp/program_cs.txt
 
           echo "=== First 15 lines of generated Program.cs ==="
           head -15 /tmp/program_cs.txt
@@ -244,42 +238,34 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          ANALYSIS=$(cat /tmp/analysis.json)
-          REF_DOCKERFILE='${{ steps.context.outputs.ref_dockerfile }}'
+          cat /tmp/analysis.json > /tmp/ctx_analysis.txt
+          echo '${{ steps.context.outputs.ref_dockerfile }}' > /tmp/ctx_ref_dockerfile.txt
 
-          PROMPT="You are an expert Docker/DevOps engineer. Generate a Dockerfile for this .NET 8 Web API based on the reference template and analysis below.
+          jq -n \
+            --rawfile analysis /tmp/ctx_analysis.txt \
+            --rawfile ref_dockerfile /tmp/ctx_ref_dockerfile.txt \
+            '{
+              model: "claude-sonnet-4-20250514",
+              max_tokens: 2000,
+              messages: [{
+                role: "user",
+                content: ("You are an expert Docker/DevOps engineer. Generate a Dockerfile for this .NET 8 Web API based on the reference template and analysis below.\n\nRULES:\n1. Return ONLY raw Dockerfile content — no markdown, no code fences, no explanation\n2. Keep the exact same structure as the reference Dockerfile\n3. Add one COPY line per .csproj from all_non_test_csproj_paths — NOT a single COPY src/\n4. The COPY src/ . line must use the correct src_root from the analysis\n5. dotnet restore and dotnet publish must target the api_project_path\n6. ENTRYPOINT must use the assembly_name from the analysis with .dll extension\n7. Keep Artifactory NuGet setup exactly as in the reference\n8. Keep EXPOSE 8080 and EXPOSE 8081\n9. Keep all other lines identical to the reference\n\nANALYSIS:\n" + $analysis + "\n\nREFERENCE DOCKERFILE:\n" + $ref_dockerfile)
+              }]
+            }' > /tmp/call3_payload.json
 
-          RULES:
-          1. Return ONLY the raw Dockerfile content — no markdown, no code fences, no explanation
-          2. Keep the exact same structure as the reference Dockerfile
-          3. Replace COPY lines with the correct .csproj paths from all_non_test_csproj_paths in the analysis — one COPY line per .csproj
-          4. The COPY src/ . line must use the correct src_root from the analysis
-          5. dotnet restore and dotnet publish must target the api_project_path
-          6. ENTRYPOINT must use the assembly_name from the analysis
-          7. Keep Artifactory NuGet setup exactly as in the reference
-          8. Keep EXPOSE 8080 and EXPOSE 8081
-          9. Keep all other lines identical to the reference
-
-          ANALYSIS:
-          $ANALYSIS
-
-          REFERENCE DOCKERFILE:
-          $REF_DOCKERFILE"
-
-          jq -n --arg prompt "$PROMPT" '{
-            model: "claude-sonnet-4-20250514",
-            max_tokens: 2000,
-            messages: [{ role: "user", content: $prompt }]
-          }' > /tmp/call3_payload.json
-
-          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+          HTTP_CODE=$(curl -s -o /tmp/call3_response.json -w "%{http_code}" \
+            https://api.anthropic.com/v1/messages \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
             -H "anthropic-version: 2023-06-01" \
             -H "content-type: application/json" \
             -d @/tmp/call3_payload.json)
 
-          AI_TEXT=$(echo "$RESPONSE" | jq -r '.content[0].text')
-          echo "$AI_TEXT" | sed '/^```/d' > /tmp/dockerfile.txt
+          echo "HTTP status: $HTTP_CODE"
+          ERROR=$(cat /tmp/call3_response.json | jq -r '.error.message // empty')
+          if [ -n "$ERROR" ]; then echo "API ERROR: $ERROR"; exit 1; fi
+
+          cat /tmp/call3_response.json | jq -r '.content[0].text // empty' \
+            | sed '/^```/d' > /tmp/dockerfile.txt
 
           echo "=== Generated Dockerfile ==="
           cat /tmp/dockerfile.txt
@@ -288,78 +274,74 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          ANALYSIS=$(cat /tmp/analysis.json)
-          REF_WORKFLOW='${{ steps.context.outputs.ref_workflow }}'
-          CONFIG='${{ steps.config.outputs.config }}'
+          cat /tmp/analysis.json > /tmp/ctx_analysis.txt
+          echo '${{ steps.context.outputs.ref_workflow }}' > /tmp/ctx_ref_workflow.txt
 
-          IMAGE_NAME=$(echo "$CONFIG" | jq -r '.image_name')
-          REPO_NAME=$(echo "$CONFIG" | jq -r '.repository_name')
+          IMAGE_NAME=$(echo '${{ steps.config.outputs.config }}' | jq -r '.image_name')
+          REPO_NAME=$(echo '${{ steps.config.outputs.config }}' | jq -r '.repository_name')
 
-          PROMPT="You are an expert GitHub Actions engineer. Generate a build workflow YAML for this .NET 8 Web API based on the reference workflow and analysis below.
+          jq -n \
+            --rawfile analysis /tmp/ctx_analysis.txt \
+            --rawfile ref_workflow /tmp/ctx_ref_workflow.txt \
+            --arg image_name "$IMAGE_NAME" \
+            --arg repo_name "$REPO_NAME" \
+            '{
+              model: "claude-sonnet-4-20250514",
+              max_tokens: 3000,
+              messages: [{
+                role: "user",
+                content: ("You are an expert GitHub Actions engineer. Generate a build workflow YAML for this .NET 8 Web API based on the reference workflow and analysis below.\n\nRULES:\n1. Return ONLY raw YAML content — no markdown, no code fences, no explanation\n2. Keep the exact same structure as the reference workflow\n3. Set the NAMESPACE env var to the sln_name from the analysis\n4. Set imageName to: " + $image_name + "\n5. Set repositoryName to: " + $repo_name + "\n6. acrName is always: acrdevgbaz1doapis\n7. deploymentEnv is always: appseng-dev\n8. autoDeploy is always: false\n9. Keep all glencore-gbldn-actions/* references exactly as in the reference\n10. Keep the full test and code coverage steps unchanged\n11. The reusable workflow reference must stay exactly as in the reference\n\nANALYSIS:\n" + $analysis + "\n\nREFERENCE WORKFLOW:\n" + $ref_workflow)
+              }]
+            }' > /tmp/call4_payload.json
 
-          RULES:
-          1. Return ONLY the raw YAML content — no markdown, no code fences, no explanation
-          2. Keep the exact same structure as the reference workflow
-          3. Set the NAMESPACE env var to the sln_name from the analysis
-          4. Set imageName to: $IMAGE_NAME
-          5. Set repositoryName to: $REPO_NAME
-          6. acrName is always: acrdevgbaz1doapis
-          7. deploymentEnv is always: appseng-dev
-          8. autoDeploy is always: false
-          9. Keep all glencore-gbldn-actions/* references exactly as in the reference
-          10. Keep the full test and code coverage steps unchanged
-          11. The reusable workflow reference must stay exactly as in the reference
-
-          ANALYSIS:
-          $ANALYSIS
-
-          REFERENCE WORKFLOW:
-          $REF_WORKFLOW"
-
-          jq -n --arg prompt "$PROMPT" '{
-            model: "claude-sonnet-4-20250514",
-            max_tokens: 3000,
-            messages: [{ role: "user", content: $prompt }]
-          }' > /tmp/call4_payload.json
-
-          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+          HTTP_CODE=$(curl -s -o /tmp/call4_response.json -w "%{http_code}" \
+            https://api.anthropic.com/v1/messages \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
             -H "anthropic-version: 2023-06-01" \
             -H "content-type: application/json" \
             -d @/tmp/call4_payload.json)
 
-          AI_TEXT=$(echo "$RESPONSE" | jq -r '.content[0].text')
-          echo "$AI_TEXT" | sed '/^```/d' > /tmp/workflow.txt
+          echo "HTTP status: $HTTP_CODE"
+          ERROR=$(cat /tmp/call4_response.json | jq -r '.error.message // empty')
+          if [ -n "$ERROR" ]; then echo "API ERROR: $ERROR"; exit 1; fi
+
+          cat /tmp/call4_response.json | jq -r '.content[0].text // empty' \
+            | sed '/^```/d' > /tmp/workflow.txt
 
           echo "=== First 20 lines of generated workflow ==="
           head -20 /tmp/workflow.txt
 
-      - name: AI call 5 — generate PR description
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          ANALYSIS=$(cat /tmp/analysis.json)
+      # - name: AI call 5 — generate PR description
+      #   env:
+      #     ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      #   run: |
+      #     cat /tmp/analysis.json > /tmp/ctx_analysis.txt
 
-          PROMPT="You are a senior developer writing a GitHub Pull Request description. Based on the analysis below, write a clear markdown PR description summarising what changes were made to containerise this .NET 8 Web API for Tanzu deployment. Include sections for: Summary, Changes Made, Health Checks Added, NuGet Changes. Keep it concise and professional. Return only the markdown text, no code fences.
+      #     jq -n \
+      #       --rawfile analysis /tmp/ctx_analysis.txt \
+      #       '{
+      #         model: "claude-sonnet-4-20250514",
+      #         max_tokens: 1000,
+      #         messages: [{
+      #           role: "user",
+      #           content: ("Write a GitHub Pull Request description in markdown summarising the containerisation changes made to this .NET 8 Web API for Tanzu deployment. Include sections: Summary, Changes Made, Health Checks Added, NuGet Changes. Be concise and professional. Return only the markdown — no code fences.\n\nANALYSIS:\n" + $analysis)
+      #         }]
+      #       }' > /tmp/call5_payload.json
 
-          ANALYSIS:
-          $ANALYSIS"
+      #     HTTP_CODE=$(curl -s -o /tmp/call5_response.json -w "%{http_code}" \
+      #       https://api.anthropic.com/v1/messages \
+      #       -H "x-api-key: $ANTHROPIC_API_KEY" \
+      #       -H "anthropic-version: 2023-06-01" \
+      #       -H "content-type: application/json" \
+      #       -d @/tmp/call5_payload.json)
 
-          jq -n --arg prompt "$PROMPT" '{
-            model: "claude-sonnet-4-20250514",
-            max_tokens: 1000,
-            messages: [{ role: "user", content: $prompt }]
-          }' > /tmp/call5_payload.json
+      #     echo "HTTP status: $HTTP_CODE"
+      #     ERROR=$(cat /tmp/call5_response.json | jq -r '.error.message // empty')
+      #     if [ -n "$ERROR" ]; then echo "API ERROR: $ERROR"; exit 1; fi
 
-          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
-            -H "x-api-key: $ANTHROPIC_API_KEY" \
-            -H "anthropic-version: 2023-06-01" \
-            -H "content-type: application/json" \
-            -d @/tmp/call5_payload.json)
-
-          AI_TEXT=$(echo "$RESPONSE" | jq -r '.content[0].text')
-          echo "$AI_TEXT" > /tmp/pr_description.txt
-          echo "PR description generated"
+      #     cat /tmp/call5_response.json | jq -r '.content[0].text // empty' \
+      #       > /tmp/pr_description.txt
+      #     echo "PR description generated"
 
       # -----------------------------------------------------------------------
       # 7. Apply generated files
@@ -375,15 +357,6 @@ jobs:
           mkdir -p .github/workflows
           cat /tmp/workflow.txt | sed '/^```/d' > .github/workflows/build.yml
           echo "Workflow written"
-
-      - name: Debug AI output
-        run: |
-          echo "=== AI analysis ==="
-          cat /tmp/ai_output.json | jq '.analysis'
-          echo "=== program_cs field ==="
-          cat /tmp/ai_output.json | jq '.program_cs' | head -20
-          echo "=== Keys in AI output ==="
-          cat /tmp/ai_output.json | jq 'keys'
 
       - name: Write updated Program.cs
         run: |
@@ -423,9 +396,15 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Add health check NuGet packages
         run: |
-          AI_OUTPUT=$(cat /tmp/ai_output.json)
-          API_CSPROJ=$(echo "$AI_OUTPUT" | jq -r '.analysis.api_project_path // empty')
-          PACKAGES=$(echo "$AI_OUTPUT" | jq -r '.analysis.nuget_packages_to_add // [] | .[]')
+          ANALYSIS=$(cat /tmp/analysis.json)
+          API_CSPROJ=$(echo "$ANALYSIS" | jq -r '.api_project_path // empty')
+          PACKAGES=$(echo "$ANALYSIS" | jq -r '.nuget_packages_to_add[]? // empty')
+
+          if [ -z "$API_CSPROJ" ]; then
+            API_CSPROJ=$(find . -not -path './.git/*' -not -path './.reference/*' \
+              -name "*.csproj" | grep -iv "test" | head -1)
+          fi
+
           NUGET_SOURCE=$(echo '${{ steps.config.outputs.config }}' | jq -r '.nuget_source // "artifactory"')
 
           if [ "$NUGET_SOURCE" = "artifactory" ]; then
@@ -434,17 +413,11 @@ jobs:
               --name ArtifactoryCloud \
               --username "${{ secrets.ARTIFACTORY_CLOUD_USER }}" \
               --password "${{ secrets.ARTIFACTORY_CLOUD_ACCESS_TOKEN }}" \
-              --store-password-in-clear-text \
-              2>/dev/null || true
+              --store-password-in-clear-text 2>/dev/null || true
             dotnet nuget disable source nuget.org 2>/dev/null || true
           else
-            echo "Using public nuget.org source"
+            echo "Using public nuget.org"
             dotnet nuget enable source nuget.org 2>/dev/null || true
-          fi
-
-          if [ -z "$API_CSPROJ" ]; then
-            echo "API project path not found. Skipping package installation."
-            exit 0
           fi
 
           for pkg in $PACKAGES; do
@@ -459,20 +432,24 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Upgrade outdated NuGet packages
         run: |
-          AI_OUTPUT=$(cat /tmp/ai_output.json)
-          API_CSPROJ=$(echo "$AI_OUTPUT" | jq -r '.analysis.api_project_path')
+          ANALYSIS=$(cat /tmp/analysis.json)
+          API_CSPROJ=$(echo "$ANALYSIS" | jq -r '.api_project_path // empty')
 
-          echo "Checking for outdated packages in $API_CSPROJ..."
+          if [ -z "$API_CSPROJ" ]; then
+            API_CSPROJ=$(find . -not -path './.git/*' -not -path './.reference/*' \
+              -name "*.csproj" | grep -iv "test" | head -1)
+          fi
+
+          echo "Checking for outdated packages in $API_CSPROJ"
           dotnet outdated "$API_CSPROJ" --upgrade --no-restore || true
-          echo "NuGet upgrade complete"
 
       # -----------------------------------------------------------------------
       # 10. Verify the project still builds
       # -----------------------------------------------------------------------
       - name: Verify build
         run: |
-          AI_OUTPUT=$(cat /tmp/ai_output.json)
-          API_CSPROJ=$(echo "$AI_OUTPUT" | jq -r '.analysis.api_project_path // empty')
+          ANALYSIS=$(cat /tmp/analysis.json)
+          API_CSPROJ=$(echo "$ANALYSIS" | jq -r '.api_project_path // empty')
 
           # Fallback — find the API .csproj directly if AI output is empty
           if [ -z "$API_CSPROJ" ]; then
@@ -488,6 +465,34 @@ jobs:
           dotnet build "$API_CSPROJ" --configuration Release --no-restore
           echo "Build verification passed"
 
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: containerize-debug
+          path: /tmp/
+          # path: |
+          #   /tmp/analysis.json
+          #   /tmp/program_cs.txt
+          #   /tmp/dockerfile.txt
+          #   /tmp/workflow.txt
+          #   /tmp/call1_payload.json
+          #   /tmp/call1_response.json
+          #   /tmp/call2_payload.json
+          #   /tmp/call2_response.json
+          #   /tmp/call3_payload.json
+          #   /tmp/call3_response.json
+          #   /tmp/call4_payload.json
+          #   /tmp/call4_response.json
+          #   /tmp/ctx_config.txt
+          #   /tmp/ctx_filetree.txt
+          #   /tmp/ctx_csproj.txt
+          #   /tmp/ctx_startup.txt
+          #   /tmp/ctx_appsettings.txt
+          #   /tmp/ctx_ref_dockerfile.txt
+          #   /tmp/ctx_ref_workflow.txt
+          retention-days: 7
+
       # -----------------------------------------------------------------------
       # 11. Raise Pull Request
       # -----------------------------------------------------------------------
@@ -495,40 +500,39 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.CONTAINERIZE_PAT }}
         run: |
-          AI_OUTPUT=$(cat /tmp/ai_output.json)
-          PR_BODY=$(cat /tmp/pr_description.txt)
-          #PR_BODY=$(echo "$AI_OUTPUT" | jq -r '.pr_description')
-          MIGRATION_NOTES=$(echo "$AI_OUTPUT" | jq -r '.startup_migration_notes')
-          CAN_DELETE=$(echo "$AI_OUTPUT" | jq -r '.startup_cs_can_be_deleted')
+          ANALYSIS=$(cat /tmp/analysis.json)
+          HAS_STARTUP=$(echo "$ANALYSIS" | jq -r '.has_startup_cs // false')
+          DB_PROVIDER=$(echo "$ANALYSIS" | jq -r '.db_provider // "none"')
+          ASSEMBLY=$(echo "$ANALYSIS" | jq -r '.assembly_name // ""')
 
           BRANCH="containerize/tanzu"
-
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
           git checkout -b "$BRANCH"
           git add -A
-          git commit -m "chore: containerize for Tanzu deployment
-
-          - Add Dockerfile
-          - Add GitHub Actions build/push workflow
-          - Add health check endpoints (liveness + readiness)
-          - Upgrade NuGet packages
-          - Migrate to .NET 8 minimal API (if applicable)"
+          git commit -m "chore: containerize for Tanzu deployment"
 
           git config --unset-all http.https://github.com/.extraheader
-
           git remote set-url origin https://x-access-token:${{ secrets.CONTAINERIZE_PAT }}@github.com/${{ github.repository }}.git
           git push origin "$BRANCH" --force
 
-          # Append manual review notes to PR body if Startup.cs was kept
-          if [ "$CAN_DELETE" = "false" ] && [ -n "$MIGRATION_NOTES" ]; then
+          PR_BODY="## Containerize for Tanzu
+
+          This PR was auto-generated by the containerize workflow.
+
+          **Changes made:**
+          - Added \`Dockerfile\` (image: \`$ASSEMBLY\`)
+          - Added \`.github/workflows/build.yml\`
+          - Added health check endpoints (\`/health/live\` and \`/health/ready\`)
+          - Added health check NuGet package (db: \`$DB_PROVIDER\`)
+          - Upgraded outdated NuGet packages"
+
+          if [ "$HAS_STARTUP" = "true" ]; then
             PR_BODY="$PR_BODY
 
           ---
           ## ⚠️ Manual Review Required
-          Startup.cs was not fully migrated. Please review:
-          $MIGRATION_NOTES"
+          Startup.cs was present — please verify the Program.cs migration is complete."
           fi
 
           gh pr create \
